@@ -1,0 +1,27 @@
+# Secrets — never commit real credentials
+.env
+.env.*
+!.env.example
+
+# Dependencies / build output
+node_modules/
+**/node_modules/
+gui/client/dist/
+
+# Runtime data (local SQLite database, generated reports)
+gui/data/
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Puppeteer downloaded browsers (if any land in-tree)
+.cache/
+.local-chromium/
+
+# Logs & OS cruft
+*.log
+npm-debug.log*
+.DS_Store
+.idea/
+.vscode/

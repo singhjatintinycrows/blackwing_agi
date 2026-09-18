@@ -1,0 +1,142 @@
+# Blackwing by Tinycrows — full stack.
+#
+#   gui      the Blackwing web console (the ONLY thing users ever open)
+#   engine   the autonomous red-teaming engine (internal only, never exposed)
+#   pgvector engine database
+#   scraper  headless browser the engine uses for web reconnaissance
+#
+# Users open the GUI at http://localhost:${BLACKWING_GUI_PORT} and never see a
+# terminal or the engine. Copy .env.example to .env and fill it in first.
+
+name: blackwing
+
+networks:
+  blackwing-net:
+    driver: bridge
+
+volumes:
+  engine-data:
+  engine-ssl:
+  engine-postgres-data:
+  scraper-ssl:
+  gui-data:
+
+services:
+  # ─────────────────────────── Blackwing GUI ───────────────────────────
+  gui:
+    build:
+      context: .
+      dockerfile: gui/Dockerfile
+    image: blackwing-gui:latest
+    container_name: blackwing-gui
+    restart: unless-stopped
+    depends_on:
+      - engine
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+      # Sign-in for the GUI itself (seeded on first boot)
+      - BLACKWING_ADMIN_EMAIL=${BLACKWING_ADMIN_EMAIL:-admin@tinycrows.com}
+      - BLACKWING_ADMIN_PASSWORD=${BLACKWING_ADMIN_PASSWORD:-blackwing}
+      # How the GUI reaches the engine (internal network)
+      - BLACKWING_ENGINE_URL=https://engine:8443
+      - BLACKWING_ENGINE_EMAIL=${BLACKWING_ENGINE_EMAIL:-admin@pentagi.com}
+      - BLACKWING_ENGINE_PASSWORD=${BLACKWING_ENGINE_PASSWORD:-admin}
+      - BLACKWING_MODEL_PROVIDER=bedrock
+      - DB_PATH=/data/blackwing.db
+    volumes:
+      - gui-data:/data
+    ports:
+      - "${BLACKWING_GUI_PORT:-8080}:3000"
+    networks:
+      - blackwing-net
+
+  # ─────────────────────── Red-teaming engine ───────────────────────
+  # Internal only: no host port is published, so users cannot reach it directly.
+  engine:
+    image: ${BLACKWING_ENGINE_IMAGE:-vxcontrol/pentagi:latest}
+    container_name: blackwing-engine
+    hostname: engine
+    restart: unless-stopped
+    expose:
+      - 8443/tcp
+    depends_on:
+      pgvector:
+        condition: service_healthy
+    environment:
+      - DEBUG=${DEBUG:-false}
+      - DOCKER_GID=998
+      - COOKIE_SIGNING_SALT=${COOKIE_SIGNING_SALT:-change-this-salt}
+      - PUBLIC_URL=https://engine:8443
+      - CORS_ORIGINS=https://engine:8443
+      - SERVER_PORT=8443
+      - SERVER_HOST=0.0.0.0
+      - SERVER_USE_SSL=true
+      - ASK_USER=false
+      # ── AWS Bedrock (best Claude models are the engine's built-in defaults) ──
+      - BEDROCK_REGION=${BEDROCK_REGION:-us-east-1}
+      - BEDROCK_DEFAULT_AUTH=${BEDROCK_DEFAULT_AUTH:-}
+      - BEDROCK_BEARER_TOKEN=${BEDROCK_BEARER_TOKEN:-}
+      - BEDROCK_ACCESS_KEY_ID=${BEDROCK_ACCESS_KEY_ID:-}
+      - BEDROCK_SECRET_ACCESS_KEY=${BEDROCK_SECRET_ACCESS_KEY:-}
+      # ── database ──
+      - DATABASE_URL=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@pgvector:5432/${POSTGRES_DB:-pentagidb}?sslmode=disable
+      # ── web recon scraper ──
+      - SCRAPER_PRIVATE_URL=https://${SCRAPER_USER:-someuser}:${SCRAPER_PASSWORD:-somepass}@scraper/
+      # ── docker-in-docker so the engine can run its tools ──
+      - DOCKER_INSIDE=true
+      - DOCKER_NET_ADMIN=true
+      - DOCKER_SOCKET=/var/run/docker.sock
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - DOCKER_PUBLIC_IP=0.0.0.0
+    logging:
+      options:
+        max-size: 50m
+        max-file: "7"
+    volumes:
+      - engine-data:/opt/pentagi/data
+      - engine-ssl:/opt/pentagi/ssl
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    user: root:root
+    networks:
+      - blackwing-net
+
+  pgvector:
+    image: ${BLACKWING_PGVECTOR_IMAGE:-vxcontrol/pgvector:latest}
+    container_name: blackwing-pgvector
+    hostname: pgvector
+    restart: unless-stopped
+    expose:
+      - 5432/tcp
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-pentagidb}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    volumes:
+      - engine-postgres-data:/var/lib/postgresql/data
+    networks:
+      - blackwing-net
+
+  scraper:
+    image: ${BLACKWING_SCRAPER_IMAGE:-vxcontrol/scraper:latest}
+    container_name: blackwing-scraper
+    hostname: scraper
+    restart: unless-stopped
+    expose:
+      - 443/tcp
+    environment:
+      - MAX_CONCURRENT_SESSIONS=${SCRAPER_MAX_SESSIONS:-10}
+      - USERNAME=${SCRAPER_USER:-someuser}
+      - PASSWORD=${SCRAPER_PASSWORD:-somepass}
+    volumes:
+      - scraper-ssl:/usr/src/app/ssl
+    shm_size: 2g
+    networks:
+      - blackwing-net
