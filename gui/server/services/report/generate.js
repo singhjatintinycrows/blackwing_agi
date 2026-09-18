@@ -33,6 +33,8 @@ async function getBrowser() {
   const puppeteer = require('puppeteer');
   _browser = await puppeteer.launch({
     headless: true,
+    // Use a system Chromium when provided (Docker image), else Puppeteer's own.
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--font-render-hinting=none'],
   });
   return _browser;

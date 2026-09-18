@@ -2,20 +2,18 @@
 # Build context is the repo root (see docker-compose.yml).
 FROM node:22-bookworm-slim
 
-# Chromium runtime libraries used by Puppeteer for PDF report rendering, plus fonts.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates fonts-liberation \
-      libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 \
-      libcups2 libdbus-1-3 libdrm2 libgbm1 libglib2.0-0 libgtk-3-0 \
-      libnspr4 libnss3 libpango-1.0-0 libpangocairo-1.0-0 \
-      libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 \
-      libxkbcommon0 libxrandr2 libxshmfence1 \
+# Use the distribution Chromium (it pulls in all of its own runtime libraries),
+# and point Puppeteer at it instead of downloading its own copy.
+# apt-get update is retried in case of transient mirror hiccups.
+RUN for i in 1 2 3 4 5; do apt-get update && break || (echo "apt update retry $i" && sleep 5); done \
+ && apt-get install -y --no-install-recommends chromium ca-certificates fonts-liberation \
  && rm -rf /var/lib/apt/lists/*
+ENV PUPPETEER_SKIP_DOWNLOAD=1 \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 WORKDIR /app/gui
 
-# Install dependencies first for better layer caching. Puppeteer's postinstall
-# downloads a matching Chromium into /root/.cache/puppeteer.
+# Install dependencies first for better layer caching.
 COPY gui/package.json ./
 COPY gui/client/package.json client/package.json
 COPY gui/server/package.json server/package.json
