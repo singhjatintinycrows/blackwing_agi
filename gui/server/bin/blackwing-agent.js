@@ -244,12 +244,14 @@ async function runPentagi(a) {
 
   let findingBuf = '';
   let inFindings = false;
+  let done = () => {};                 // assigned by the completion Promise below
   const emitAssistantText = (text, isThink) => {
     if (!text) return;
     for (const raw of String(text).split(/\r?\n/)) {
       const line = raw.trimEnd();
       if (line.includes(FINDINGS_BEGIN)) { inFindings = true; continue; }
-      if (line.includes(FINDINGS_END))   { inFindings = false; continue; }
+      // The findings block is the agent's final output — treat its end as done.
+      if (line.includes(FINDINGS_END))   { inFindings = false; setTimeout(() => done(), 800); continue; }
       if (inFindings) { if (line.trim()) findingBuf += line + '\n'; continue; }
       if (!line.trim()) continue;
       isThink ? think(line) : status(line);
@@ -261,7 +263,7 @@ async function runPentagi(a) {
 
   await new Promise((resolve) => {
     let settled = false;
-    const done = () => { if (!settled) { settled = true; resolve(); } };
+    done = () => { if (!settled) { settled = true; resolve(); } };
 
     // Terminal command output — the engine's "terminal" the user wants to watch.
     sub(`subscription($id:ID!){ terminalLogAdded(flowId:$id){ text } }`, { id: flowId },
@@ -287,14 +289,14 @@ async function runPentagi(a) {
       (d) => { const m = d && d.messageLogUpdated; if (m) { emitAssistantText(m.message, false); if (m.result) emitAssistantText(m.result, false); } });
     // Flow lifecycle — resolve when the flow reaches a terminal state.
     sub(`subscription{ flowUpdated{ id status } }`, {},
-      (d) => { const f = d && d.flowUpdated; if (f && String(f.id) === String(flowId) && /finished|failed|completed|stopped/i.test(f.status)) { status(`Flow ${f.status}.`); setTimeout(done, 2500); } });
+      (d) => { const f = d && d.flowUpdated; if (f && String(f.id) === String(flowId) && /finished|failed|completed|stopped|waiting/i.test(f.status)) { status(`Flow ${f.status}.`); setTimeout(done, 2500); } });
 
     // Polling fallback for completion (the subscription can miss the terminal event).
     const poll = setInterval(async () => {
       try {
         const r = await gql(auth, `query($id:ID!){ flow(flowId:$id){ status } }`, { id: flowId });
         const st = r && r.flow && r.flow.status;
-        if (st && /finished|failed|completed|stopped/i.test(st)) { clearInterval(poll); status(`Flow ${st}.`); setTimeout(done, 1500); }
+        if (st && /finished|failed|completed|stopped|waiting/i.test(st)) { clearInterval(poll); status(`Flow ${st}.`); setTimeout(done, 1500); }
       } catch {}
     }, 15000);
 
