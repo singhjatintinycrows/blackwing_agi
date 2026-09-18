@@ -37,6 +37,7 @@
 if (!process.env.BLACKWING_ENGINE_TLS_STRICT) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const fs = require('fs');
+const WS = require('ws');
 
 /* ───────────────────────── output helpers ───────────────────────── */
 function out(line) { process.stdout.write(line.replace(/\r?\n/g, ' ').trimEnd() + '\n'); }
@@ -129,7 +130,7 @@ async function pentagiAuth() {
   const res = await fetch(apiBase() + '/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ mail: email, password }),
   });
   if (!res.ok) throw new Error(`Engine login failed (${res.status}). Check BLACKWING_ENGINE_EMAIL/PASSWORD or set BLACKWING_ENGINE_TOKEN.`);
   const setCookie = res.headers.getSetCookie ? res.headers.getSetCookie() : [res.headers.get('set-cookie')].filter(Boolean);
@@ -148,28 +149,33 @@ async function gql(auth, query, variables) {
   return body.data;
 }
 
-/* Minimal graphql-transport-ws subscription client (no external deps). */
+/* graphql-transport-ws subscription client. The engine authenticates the WS at
+ * the HTTP upgrade, so the cookie/bearer must be sent as a handshake header —
+ * which the `ws` library allows (the global WebSocket does not). */
 function subscribe(auth, query, variables, onNext, onComplete) {
   const wsUrl = apiBase().replace(/^http/, 'ws') + '/graphql';
-  const ws = new WebSocket(wsUrl, 'graphql-transport-ws');
-  let acked = false;
-  ws.addEventListener('open', () => {
-    ws.send(JSON.stringify({ type: 'connection_init', payload: { ...auth.headers } }));
+  const ws = new WS(wsUrl, 'graphql-transport-ws', {
+    headers: auth.headers || {},
+    rejectUnauthorized: false,
   });
-  ws.addEventListener('message', (ev) => {
-    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+  let acked = false;
+  ws.on('open', () => ws.send(JSON.stringify({ type: 'connection_init', payload: {} })));
+  ws.on('message', (data) => {
+    let msg; try { msg = JSON.parse(data.toString()); } catch { return; }
     if (msg.type === 'connection_ack' && !acked) {
       acked = true;
       ws.send(JSON.stringify({ id: '1', type: 'subscribe', payload: { query, variables } }));
     } else if (msg.type === 'next') {
       try { onNext(msg.payload && msg.payload.data); } catch {}
-    } else if (msg.type === 'complete' || msg.type === 'error') {
+    } else if (msg.type === 'complete') {
       onComplete && onComplete();
       try { ws.close(); } catch {}
+    } else if (msg.type === 'error') {
+      try { process.stderr.write('sub error: ' + JSON.stringify(msg.payload).slice(0, 200) + '\n'); } catch {}
     }
   });
-  ws.addEventListener('error', () => { onComplete && onComplete(); });
-  ws.addEventListener('close', () => { onComplete && onComplete(); });
+  ws.on('error', () => { onComplete && onComplete(); });
+  ws.on('close', () => { onComplete && onComplete(); });
   return ws;
 }
 
@@ -225,43 +231,77 @@ async function runPentagi(a) {
     }
   };
 
+  const subs = [];
+  const sub = (q, v, cb) => subs.push(subscribe(auth, q, v, cb));
+
   await new Promise((resolve) => {
     let settled = false;
     const done = () => { if (!settled) { settled = true; resolve(); } };
 
-    // Terminal command output — the "PentAGI terminal" the user wants to watch.
-    subscribe(auth, `subscription($id:ID!){ terminalLogAdded(flowId:$id){ text type } }`, { id: flowId },
-      (d) => d && d.terminalLogAdded && status('$ ' + (d.terminalLogAdded.text || '').trim()));
+    // Terminal command output — the engine's "terminal" the user wants to watch.
+    sub(`subscription($id:ID!){ terminalLogAdded(flowId:$id){ text } }`, { id: flowId },
+      (d) => { const t = d && d.terminalLogAdded; if (t && t.text) for (const ln of String(t.text).split(/\r?\n/)) if (ln.trim()) status('$ ' + ln.trim()); });
     // Tool calls (nmap, scrapers, code exec, …)
-    subscribe(auth, `subscription($id:ID!){ toolCallLogAdded(flowId:$id){ name message } }`, { id: flowId },
-      (d) => d && d.toolCallLogAdded && status(`tool: ${d.toolCallLogAdded.name || ''} ${d.toolCallLogAdded.message || ''}`.trim()));
+    sub(`subscription($id:ID!){ toolCallLogAdded(flowId:$id){ name status args } }`, { id: flowId },
+      (d) => { const t = d && d.toolCallLogAdded; if (t) status(`tool ${t.name} [${t.status}]` + (t.args && String(t.status).toLowerCase() === 'running' ? ' ' + String(t.args).replace(/\s+/g, ' ').slice(0, 140) : '')); });
+    // Web searches
+    sub(`subscription($id:ID!){ searchLogAdded(flowId:$id){ engine query } }`, { id: flowId },
+      (d) => { const s = d && d.searchLogAdded; if (s) status(`search (${s.engine}): ${s.query}`); });
     // Task / subtask progress
-    subscribe(auth, `subscription($id:ID!){ taskUpdated(flowId:$id){ title status } }`, { id: flowId },
-      (d) => d && d.taskUpdated && status(`task "${d.taskUpdated.title}" → ${d.taskUpdated.status}`));
-    // Agent reasoning + assistant messages (carries the findings block at the end)
-    subscribe(auth, `subscription($id:ID!){ agentLogAdded(flowId:$id){ message type } }`, { id: flowId },
-      (d) => d && d.agentLogAdded && emitAssistantText(d.agentLogAdded.message, true));
-    subscribe(auth, `subscription($id:ID!){ messageLogAdded(flowId:$id){ message type } }`, { id: flowId },
-      (d) => d && d.messageLogAdded && emitAssistantText(d.messageLogAdded.message, false));
+    sub(`subscription($id:ID!){ taskCreated(flowId:$id){ title status } }`, { id: flowId },
+      (d) => { const t = d && d.taskCreated; if (t) status(`task "${t.title}" created`); });
+    sub(`subscription($id:ID!){ taskUpdated(flowId:$id){ title status } }`, { id: flowId },
+      (d) => { const t = d && d.taskUpdated; if (t) status(`task "${t.title}" → ${t.status}`); });
+    // Agent reasoning (agent-to-agent delegation)
+    sub(`subscription($id:ID!){ agentLogAdded(flowId:$id){ executor task result } }`, { id: flowId },
+      (d) => { const a = d && d.agentLogAdded; if (a) { if (a.task) think(`${a.executor}: ${a.task}`); if (a.result) emitAssistantText(a.result, false); } });
+    // Assistant messages (carry the findings block at the end)
+    sub(`subscription($id:ID!){ messageLogAdded(flowId:$id){ message thinking result } }`, { id: flowId },
+      (d) => { const m = d && d.messageLogAdded; if (m) { if (m.thinking) emitAssistantText(m.thinking, true); emitAssistantText(m.message, false); if (m.result) emitAssistantText(m.result, false); } });
+    sub(`subscription($id:ID!){ messageLogUpdated(flowId:$id){ message result } }`, { id: flowId },
+      (d) => { const m = d && d.messageLogUpdated; if (m) { emitAssistantText(m.message, false); if (m.result) emitAssistantText(m.result, false); } });
     // Flow lifecycle — resolve when the flow reaches a terminal state.
-    subscribe(auth, `subscription{ flowUpdated{ id status } }`, {},
-      (d) => {
-        const f = d && d.flowUpdated;
-        if (f && String(f.id) === String(flowId)) {
-          status(`Flow status: ${f.status}`);
-          if (/finished|failed|completed|done|stopped/i.test(f.status)) setTimeout(done, 1500);
-        }
-      });
+    sub(`subscription{ flowUpdated{ id status } }`, {},
+      (d) => { const f = d && d.flowUpdated; if (f && String(f.id) === String(flowId) && /finished|failed|completed|stopped/i.test(f.status)) { status(`Flow ${f.status}.`); setTimeout(done, 2500); } });
+
+    // Polling fallback for completion (the subscription can miss the terminal event).
+    const poll = setInterval(async () => {
+      try {
+        const r = await gql(auth, `query($id:ID!){ flow(flowId:$id){ status } }`, { id: flowId });
+        const st = r && r.flow && r.flow.status;
+        if (st && /finished|failed|completed|stopped/i.test(st)) { clearInterval(poll); status(`Flow ${st}.`); setTimeout(done, 1500); }
+      } catch {}
+    }, 15000);
 
     // Safety timeout: don't hang forever if the engine goes quiet.
-    setTimeout(done, parseInt(process.env.BLACKWING_FLOW_TIMEOUT_MS || '5400000', 10));
+    setTimeout(() => { clearInterval(poll); done(); }, parseInt(process.env.BLACKWING_FLOW_TIMEOUT_MS || '5400000', 10));
   });
 
-  // Emit the parsed findings.
-  const lines = findingBuf.split('\n').map((l) => l.trim()).filter(Boolean);
+  subs.forEach((w) => { try { w.close(); } catch {} });
+
+  // Robust findings capture: if the live stream didn't catch the block, pull it
+  // from the flow's stored messages over HTTP.
+  if (!findingBuf.includes('|')) {
+    try {
+      const r = await gql(auth, `query($id:ID!){ messageLogs(flowId:$id){ message result } }`, { id: flowId });
+      for (const m of (r && r.messageLogs) || []) {
+        for (const f of [m.result, m.message]) {
+          if (f && String(f).includes(FINDINGS_BEGIN) && String(f).includes(FINDINGS_END)) {
+            findingBuf += String(f).split(FINDINGS_BEGIN)[1].split(FINDINGS_END)[0] + '\n';
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // Emit the parsed findings (deduped).
+  const seen = new Set();
   let count = 0;
-  for (const l of lines) {
-    if (/^none$/i.test(l)) continue;
+  for (const raw of findingBuf.split('\n')) {
+    const l = raw.trim();
+    if (!l || /^none$/i.test(l) || l.toLowerCase().startsWith('severity|')) continue;
+    if (seen.has(l)) continue;
+    seen.add(l);
     const [sev, cat, title, impact, remediation] = l.split('|').map((s) => (s || '').trim());
     if (!title && !sev) continue;
     finding((sev || 'info').toLowerCase(), cat, title || sev, [impact, remediation].filter(Boolean).join(' '));

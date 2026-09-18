@@ -76,8 +76,12 @@ services:
       - ASK_USER=false
       # ── AWS Bedrock (best Claude models are the engine's built-in defaults) ──
       - BEDROCK_REGION=${BEDROCK_REGION:-us-east-1}
-      - BEDROCK_DEFAULT_AUTH=${BEDROCK_DEFAULT_AUTH:-}
+      - AWS_REGION=${BEDROCK_REGION:-us-east-1}
+      - BEDROCK_DEFAULT_AUTH=${BEDROCK_DEFAULT_AUTH:-false}
       - BEDROCK_BEARER_TOKEN=${BEDROCK_BEARER_TOKEN:-}
+      # AWS-standard env var for Bedrock API keys — the SDK reads this natively
+      # and selects bearer-token auth for the Converse operation.
+      - AWS_BEARER_TOKEN_BEDROCK=${BEDROCK_BEARER_TOKEN:-}
       - BEDROCK_ACCESS_KEY_ID=${BEDROCK_ACCESS_KEY_ID:-}
       - BEDROCK_SECRET_ACCESS_KEY=${BEDROCK_SECRET_ACCESS_KEY:-}
       # ── database ──
