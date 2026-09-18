@@ -6,7 +6,8 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { buildHtml } = require('./template');
+const { buildHtml } = require('./template');          // AI red teaming report
+const { buildWebHtml } = require('./webtemplate');    // web-app pentest report
 
 const ASSETS = path.join(__dirname, 'assets');
 const dataUri = (file, mime) =>
@@ -46,7 +47,10 @@ async function getBrowser() {
  */
 async function generateReportPdf(data) {
   const assets = loadAssets();
-  let html = buildHtml(data, assets);
+  // Pick the report that matches the assessment type: AI/LLM target -> AI Red
+  // Teaming report; everything else -> Website Assessment pentest report.
+  const build = data.assessmentType === 'ai' ? buildHtml : buildWebHtml;
+  let html = build(data, assets);
   // Load Paged.js in manual mode so we can await pagination before printing.
   const pagedSrc = fs.readFileSync(path.join(ASSETS, 'paged.polyfill.min.js'), 'utf8');
   html = html.replace('</head>', '<script>window.PagedConfig={auto:false};</script></head>');

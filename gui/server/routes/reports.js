@@ -6,6 +6,15 @@ const { generateReportPdf } = require('../services/report/generate');
 
 const router = express.Router();
 
+// Same auto-detection the engine bridge uses: AI/LLM target -> AI Red Teaming
+// report; anything else -> Website Assessment (web-app pentest) report.
+const AI_SIGNAL = /\b(ai|llm|genai|gen-ai|gpt|chatbot|chat\s?bot|assistant|copilot|prompt|openai|anthropic|bedrock|gemini|claude|inference|completion)\b/i;
+function detectAssessmentType(cfg, target, appName) {
+  if (cfg && cfg.assessmentType) return cfg.assessmentType;
+  const hay = [target, appName, cfg && cfg.spec].filter(Boolean).join(' ');
+  return AI_SIGNAL.test(hay) ? 'ai' : 'web';
+}
+
 // GET /api/reports
 router.get('/', requireAuth, (req, res) => {
   const rows = db.prepare(`
@@ -59,6 +68,7 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
 
   let cfg = {}; try { cfg = JSON.parse(report.config_json || '{}'); } catch {}
   const org = report.app_name || cfg.appName || '[Organization Name]';
+  const assessmentType = detectAssessmentType(cfg, report.target, report.app_name);
 
   const data = {
     org,
@@ -69,6 +79,7 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
     preparedBy: (req.user && req.user.name) || 'Blackwing',
     reviewedBy: cfg.devContact || '',
     date: String(report.created_at || '').slice(0, 10) || undefined,
+    assessmentType,
     findings: findings.map((f) => ({
       severity: f.severity, category: f.category, title: f.title,
       description: f.description, remediation: f.remediation, status: f.status,
@@ -78,7 +89,8 @@ router.get('/:id/pdf', requireAuth, async (req, res) => {
   try {
     const pdf = await generateReportPdf(data);
     const safe = String(org).replace(/[\[\]]/g, '').replace(/[^\w .-]/g, '').trim();
-    const fname = (safe && safe !== 'Organization Name' ? safe + ' ' : '') + 'AI Red Teaming Report.pdf';
+    const reportName = assessmentType === 'ai' ? 'AI Red Teaming Report.pdf' : 'Website Assessment Report.pdf';
+    const fname = (safe && safe !== 'Organization Name' ? safe + ' ' : '') + reportName;
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
     res.send(pdf);
