@@ -43,7 +43,7 @@ services:
       - BLACKWING_ENGINE_URL=https://engine:8443
       - BLACKWING_ENGINE_EMAIL=${BLACKWING_ENGINE_EMAIL:-admin@pentagi.com}
       - BLACKWING_ENGINE_PASSWORD=${BLACKWING_ENGINE_PASSWORD:-admin}
-      - BLACKWING_MODEL_PROVIDER=bedrock
+      - BLACKWING_MODEL_PROVIDER=${BLACKWING_MODEL_PROVIDER:-bedrock}
       - DB_PATH=/data/blackwing.db
     volumes:
       - gui-data:/data
