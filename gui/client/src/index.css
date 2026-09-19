@@ -583,3 +583,9 @@ select {
   --sidebar-w: 180px;
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* ─── Assessment progress bar ─── */
+.dw-progress { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; }
+.dw-progress__track { flex: 1; height: 8px; background: var(--edge); border-radius: 99px; overflow: hidden; }
+.dw-progress__fill { height: 100%; background: var(--crimson); border-radius: 99px; transition: width .4s ease; }
+.dw-progress__label { font-size: 12px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }

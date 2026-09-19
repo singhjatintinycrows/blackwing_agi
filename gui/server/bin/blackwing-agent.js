@@ -311,10 +311,21 @@ async function runPentagi(a) {
     sub(`subscription{ flowUpdated{ id status } }`, {},
       (d) => { const f = d && d.flowUpdated; if (f && String(f.id) === String(flowId) && /finished|failed|completed|stopped|waiting/i.test(f.status)) maybeFinish(f.status); });
 
-    // Polling fallback (a subscription can miss the terminal event).
+    // Polling: emit progress (subtasks done / total) and detect completion.
+    let lastPct = -1;
     const poll = setInterval(async () => {
       try {
-        const r = await gql(auth, `query($id:ID!){ flow(flowId:$id){ status } }`, { id: flowId });
+        const r = await gql(auth, `query($id:ID!){ flow(flowId:$id){ status } tasks(flowId:$id){ subtasks{ status } } }`, { id: flowId });
+        let done = 0, tot = 0;
+        for (const t of (r && r.tasks) || []) for (const s of (t.subtasks) || []) { tot++; if (/finished|completed|done/i.test(String(s.status))) done++; }
+        if (tot) {
+          const pct = Math.round(done * 100 / tot);
+          if (pct !== lastPct) {
+            lastPct = pct;
+            const fill = Math.round(pct / 10);
+            status(`Progress ${'▓'.repeat(fill)}${'░'.repeat(10 - fill)} ${pct}% (${done}/${tot} steps)`);
+          }
+        }
         const st = r && r.flow && r.flow.status;
         if (st && /finished|failed|completed|stopped|waiting/i.test(st)) { clearInterval(poll); maybeFinish(st); }
       } catch {}

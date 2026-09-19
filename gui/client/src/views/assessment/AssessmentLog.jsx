@@ -32,6 +32,13 @@ export function AssessmentLog({ runId, status, logLines, onLog, onDone, onClose 
     return line.cls || '';
   }
 
+  // Live progress from the latest "Progress … X% (a/b steps)" line the engine emits.
+  let progress = null;
+  for (let i = logLines.length - 1; i >= 0; i--) {
+    const m = logLines[i].text && logLines[i].text.match(/Progress\b.*?(\d+)%\s*\((\d+)\/(\d+)\s*steps\)/);
+    if (m) { progress = { pct: +m[1], done: +m[2], total: +m[3] }; break; }
+  }
+
   return (
     <Modal
       open={!!runId}
@@ -49,6 +56,14 @@ export function AssessmentLog({ runId, status, logLines, onLog, onDone, onClose 
         </button>
       }
     >
+      {status === 'running' && progress && (
+        <div className="dw-progress" title={`${progress.done} of ${progress.total} steps completed`}>
+          <div className="dw-progress__track">
+            <div className="dw-progress__fill" style={{ width: `${progress.pct}%` }} />
+          </div>
+          <div className="dw-progress__label">{progress.pct}% · {progress.done}/{progress.total} steps</div>
+        </div>
+      )}
       <div className="dw-log" ref={logRef}>
         {logLines.map((line, i) => {
           const c = cls(line);
