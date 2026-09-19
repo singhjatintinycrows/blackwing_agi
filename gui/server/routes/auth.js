@@ -9,7 +9,7 @@ const { authLimiter } = require('../middleware/rateLimit');
 const router = express.Router();
 
 const SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
-const ACCESS_TTL = parseInt(process.env.JWT_ACCESS_TTL || '900', 10);
+const ACCESS_TTL = parseInt(process.env.JWT_ACCESS_TTL || '43200', 10);
 const REFRESH_TTL = parseInt(process.env.JWT_REFRESH_TTL || '604800', 10);
 
 function issueTokens(res, user) {
