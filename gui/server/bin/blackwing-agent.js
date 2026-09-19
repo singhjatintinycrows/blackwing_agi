@@ -244,12 +244,13 @@ async function runPentagi(a) {
 
   let findingBuf = '';
   let inFindings = false;
+  let findingsSeen = false;
   let done = () => {};                 // assigned by the completion Promise below
   const emitAssistantText = (text, isThink) => {
     if (!text) return;
     for (const raw of String(text).split(/\r?\n/)) {
       const line = raw.trimEnd();
-      if (line.includes(FINDINGS_BEGIN)) { inFindings = true; continue; }
+      if (line.includes(FINDINGS_BEGIN)) { inFindings = true; findingsSeen = true; continue; }
       // The findings block is the agent's final output — treat its end as done.
       if (line.includes(FINDINGS_END))   { inFindings = false; setTimeout(() => done(), 800); continue; }
       if (inFindings) { if (line.trim()) findingBuf += line + '\n'; continue; }
@@ -287,21 +288,40 @@ async function runPentagi(a) {
       (d) => { const m = d && d.messageLogAdded; if (m) { if (m.thinking) emitAssistantText(m.thinking, true); emitAssistantText(m.message, false); if (m.result) emitAssistantText(m.result, false); } });
     sub(`subscription($id:ID!){ messageLogUpdated(flowId:$id){ message result } }`, { id: flowId },
       (d) => { const m = d && d.messageLogUpdated; if (m) { emitAssistantText(m.message, false); if (m.result) emitAssistantText(m.result, false); } });
-    // Flow lifecycle — resolve when the flow reaches a terminal state.
-    sub(`subscription{ flowUpdated{ id status } }`, {},
-      (d) => { const f = d && d.flowUpdated; if (f && String(f.id) === String(flowId) && /finished|failed|completed|stopped|waiting/i.test(f.status)) { status(`Flow ${f.status}.`); setTimeout(done, 2500); } });
+    // When the engine goes idle, only finish once we actually have findings.
+    // If it idled WITHOUT a findings block, ask it to compile one and keep
+    // waiting (with a grace backstop) rather than ending with an empty report.
+    let nudged = false;
+    const maybeFinish = async (statusStr) => {
+      status(`Flow ${statusStr}.`);
+      if (findingsSeen) { setTimeout(done, 1500); return; }
+      if (nudged) return;                       // already asked — wait for grace timer
+      nudged = true;
+      status('Engine went idle without findings — asking it to compile the findings block…');
+      try {
+        await gql(auth,
+          `mutation($id:ID!,$in:String!,$p:String){ putUserInput(flowId:$id,input:$in,modelProvider:$p) }`,
+          { id: flowId, p: provider, in:
+            `Stop testing now. Based on everything you have already done, output ONLY the findings block, in this exact format and nothing else:\n${FINDINGS_BEGIN}\nseverity|category|title|one-sentence impact|one-sentence remediation\n${FINDINGS_END}\nInclude every confirmed or strongly-evidenced issue (misconfigurations count). If truly nothing, put a single line: none` });
+      } catch {}
+      setTimeout(done, parseInt(process.env.BLACKWING_FINDINGS_GRACE_MS || '300000', 10));
+    };
 
-    // Polling fallback for completion (the subscription can miss the terminal event).
+    // Flow lifecycle.
+    sub(`subscription{ flowUpdated{ id status } }`, {},
+      (d) => { const f = d && d.flowUpdated; if (f && String(f.id) === String(flowId) && /finished|failed|completed|stopped|waiting/i.test(f.status)) maybeFinish(f.status); });
+
+    // Polling fallback (a subscription can miss the terminal event).
     const poll = setInterval(async () => {
       try {
         const r = await gql(auth, `query($id:ID!){ flow(flowId:$id){ status } }`, { id: flowId });
         const st = r && r.flow && r.flow.status;
-        if (st && /finished|failed|completed|stopped|waiting/i.test(st)) { clearInterval(poll); status(`Flow ${st}.`); setTimeout(done, 1500); }
+        if (st && /finished|failed|completed|stopped|waiting/i.test(st)) { clearInterval(poll); maybeFinish(st); }
       } catch {}
     }, 15000);
 
-    // Safety timeout: don't hang forever if the engine goes quiet.
-    setTimeout(() => { clearInterval(poll); done(); }, parseInt(process.env.BLACKWING_FLOW_TIMEOUT_MS || '5400000', 10));
+    // Hard safety timeout (last resort so it never hangs forever).
+    setTimeout(() => { clearInterval(poll); done(); }, parseInt(process.env.BLACKWING_FLOW_TIMEOUT_MS || '10800000', 10));
   });
 
   subs.forEach((w) => { try { w.close(); } catch {} });
